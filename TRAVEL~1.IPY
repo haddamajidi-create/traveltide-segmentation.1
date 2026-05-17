@@ -1,0 +1,289 @@
+{
+ "cells": [
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": "# TravelTide Customer Segmentation \u2013 Vollst\u00e4ndiges Projekt-Notebook\n\n**Autor:** Hd \u00b7 **Datum:** Mai 2026\n\nDieses Notebook deckt **Wochen 1\u20133** des TravelTide-Projekts ab:\n\n1. **Woche 1** \u2013 Erste Datenexploration (EDA), Datenqualit\u00e4t, deskriptive Statistik\n2. **Woche 2** \u2013 Feature Engineering: Verhaltensmetriken pro User\n3. **Woche 3** \u2013 Datenvorverarbeitung: Kohorte filtern, auf User-Ebene aggregieren, Ausrei\u00dfer entfernen, skalieren\n\n> **Hinweis zur DB:** Die TravelTide-DB liegt auf Neon (PostgreSQL). Falls Pakete fehlen:\n> `!pip install psycopg2-binary sqlalchemy pandas seaborn scikit-learn`\n"
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": "## 0. Setup & Imports"
+  },
+  {
+   "cell_type": "code",
+   "metadata": {},
+   "execution_count": null,
+   "outputs": [],
+   "source": "# !pip install psycopg2-binary sqlalchemy pandas seaborn scikit-learn matplotlib\nimport warnings, numpy as np, pandas as pd\nimport matplotlib.pyplot as plt, seaborn as sns\nfrom sqlalchemy import create_engine\n\nwarnings.filterwarnings(\"ignore\")\npd.set_option(\"display.max_columns\", 60); pd.set_option(\"display.width\", 180)\nsns.set_theme(style=\"whitegrid\")\n\nDB_URL = \"postgresql+psycopg2://Test:bQNxVzJL4g6u@ep-noisy-flower-846766.us-east-2.aws.neon.tech/TravelTide?sslmode=require\"\nengine = create_engine(DB_URL)\nprint(\"Engine erstellt:\", engine)"
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": "## 1. Datenstruktur verstehen\n\n**Fact- vs. Dimensionstabellen:**\n- `sessions` ist die **Fact-Tabelle** \u2013 sie h\u00e4lt die kleinsten Ereignisse (eine Zeile pro Browsing-Session) und wird laufend nachgeschrieben.\n- `users` ist eine **Dimensionstabelle** \u2013 statische, beschreibende Eigenschaften der User.\n- `flights` und `hotels` sind ebenfalls **Fact-Tabellen** (pro Buchung eine Zeile, an `trip_id` der Session gekn\u00fcpft).\n"
+  },
+  {
+   "cell_type": "code",
+   "metadata": {},
+   "execution_count": null,
+   "outputs": [],
+   "source": "row_counts = pd.read_sql(\"\"\"\nSELECT 'users'    AS tbl, COUNT(*) AS n FROM users\nUNION ALL SELECT 'sessions', COUNT(*) FROM sessions\nUNION ALL SELECT 'flights',  COUNT(*) FROM flights\nUNION ALL SELECT 'hotels',   COUNT(*) FROM hotels\n\"\"\", engine)\nrow_counts"
+  },
+  {
+   "cell_type": "code",
+   "metadata": {},
+   "execution_count": null,
+   "outputs": [],
+   "source": "schema = pd.read_sql(\"\"\"\nSELECT table_name, column_name, data_type\nFROM information_schema.columns\nWHERE table_schema='public' AND table_name IN ('users','sessions','flights','hotels')\nORDER BY table_name, ordinal_position\"\"\", engine)\nschema"
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": "## 2. Datenqualit\u00e4t \u2013 Null-Werte, Auff\u00e4lligkeiten"
+  },
+  {
+   "cell_type": "code",
+   "metadata": {},
+   "execution_count": null,
+   "outputs": [],
+   "source": "null_check = pd.read_sql(\"\"\"\nSELECT\n  COUNT(*) FILTER (WHERE session_id IS NULL)             AS null_session_id,\n  COUNT(*) FILTER (WHERE user_id IS NULL)                AS null_user_id,\n  COUNT(*) FILTER (WHERE trip_id IS NULL)                AS null_trip_id,\n  COUNT(*) FILTER (WHERE flight_discount_amount IS NULL) AS null_flight_disc,\n  COUNT(*) FILTER (WHERE hotel_discount_amount IS NULL)  AS null_hotel_disc\nFROM sessions\"\"\", engine)\nnull_check"
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": "### `hotel_name` \u2013 Format ist nicht einheitlich (oft Stadt mitkodiert)"
+  },
+  {
+   "cell_type": "code",
+   "metadata": {},
+   "execution_count": null,
+   "outputs": [],
+   "source": "pd.read_sql(\"\"\"\nSELECT hotel_name, COUNT(*) AS n FROM hotels\nGROUP BY hotel_name ORDER BY n DESC LIMIT 20\"\"\", engine)"
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": "### Anomalien in `nights` \u2013 0 oder negative Werte"
+  },
+  {
+   "cell_type": "code",
+   "metadata": {},
+   "execution_count": null,
+   "outputs": [],
+   "source": "pd.read_sql(\"\"\"\nSELECT nights, COUNT(*) AS n FROM hotels\nGROUP BY nights ORDER BY nights LIMIT 20\"\"\", engine)"
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": "## 3. Deskriptive Analyse \u2013 Demografie & Buchungsverhalten"
+  },
+  {
+   "cell_type": "code",
+   "metadata": {},
+   "execution_count": null,
+   "outputs": [],
+   "source": "pd.read_sql(\"\"\"\nSELECT gender, married, has_children, COUNT(*) AS n\nFROM users GROUP BY gender, married, has_children ORDER BY n DESC\"\"\", engine)"
+  },
+  {
+   "cell_type": "code",
+   "metadata": {},
+   "execution_count": null,
+   "outputs": [],
+   "source": "years = pd.read_sql(\"\"\"\nSELECT EXTRACT(YEAR FROM birthdate)::int AS birth_year, COUNT(*) AS n\nFROM users GROUP BY birth_year ORDER BY birth_year\"\"\", engine)\nplt.figure(figsize=(11,4))\nsns.barplot(data=years, x=\"birth_year\", y=\"n\", color=\"steelblue\")\nplt.xticks(rotation=80)\nplt.title(\"Verteilung Geburtsjahr (Auff\u00e4lligkeit: 2006-Peak = Default-Wert)\")\nplt.show()"
+  },
+  {
+   "cell_type": "code",
+   "metadata": {},
+   "execution_count": null,
+   "outputs": [],
+   "source": "# Kundenalter = Monate seit Anmeldung\npd.read_sql(\"\"\"\nSELECT AVG(DATE_PART('year', AGE(CURRENT_DATE, sign_up_date))*12\n         + DATE_PART('month', AGE(CURRENT_DATE, sign_up_date))) AS avg_months_since_signup\nFROM users\"\"\", engine)"
+  },
+  {
+   "cell_type": "code",
+   "metadata": {},
+   "execution_count": null,
+   "outputs": [],
+   "source": "# Top 10 beliebteste Hotels\npd.read_sql(\"\"\"\nSELECT hotel_name, COUNT(*) AS bookings,\n       ROUND(AVG(nights)::numeric,2) AS avg_nights,\n       ROUND(AVG(hotel_per_room_usd)::numeric,2) AS avg_price\nFROM hotels WHERE nights > 0\nGROUP BY hotel_name ORDER BY bookings DESC LIMIT 10\"\"\", engine)"
+  },
+  {
+   "cell_type": "code",
+   "metadata": {},
+   "execution_count": null,
+   "outputs": [],
+   "source": "# Top 10 teuerste Hotels\npd.read_sql(\"\"\"\nSELECT hotel_name,\n       ROUND(AVG(hotel_per_room_usd)::numeric,2) AS avg_price,\n       COUNT(*) AS bookings\nFROM hotels GROUP BY hotel_name ORDER BY avg_price DESC LIMIT 10\"\"\", engine)"
+  },
+  {
+   "cell_type": "code",
+   "metadata": {},
+   "execution_count": null,
+   "outputs": [],
+   "source": "# Top 10 l\u00e4ngste Aufenthalte\npd.read_sql(\"\"\"\nSELECT hotel_name, ROUND(AVG(nights)::numeric,2) AS avg_nights, COUNT(*) AS bookings\nFROM hotels WHERE nights > 0\nGROUP BY hotel_name ORDER BY avg_nights DESC LIMIT 10\"\"\", engine)"
+  },
+  {
+   "cell_type": "code",
+   "metadata": {},
+   "execution_count": null,
+   "outputs": [],
+   "source": "# Meistgenutzte Airline letzte 6 Monate\npd.read_sql(\"\"\"\nSELECT trip_airline, COUNT(*) AS flights\nFROM flights WHERE departure_time >= CURRENT_DATE - INTERVAL '6 months'\nGROUP BY trip_airline ORDER BY flights DESC LIMIT 10\"\"\", engine)"
+  },
+  {
+   "cell_type": "code",
+   "metadata": {},
+   "execution_count": null,
+   "outputs": [],
+   "source": "# Durchschnittliche Sitzpl\u00e4tze\npd.read_sql(\"SELECT AVG(seats)::float AS avg_seats FROM flights\", engine)"
+  },
+  {
+   "cell_type": "code",
+   "metadata": {},
+   "execution_count": null,
+   "outputs": [],
+   "source": "# Page clicks\npd.read_sql(\"\"\"\nSELECT AVG(page_clicks)::float AS mean_clicks,\n       PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY page_clicks) AS median_clicks,\n       MAX(page_clicks) AS max_clicks FROM sessions\"\"\", engine)"
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": "---\n## 4. Kohorte definieren (Elenas Definition)\n\n**Filter:** Sessions ab `2023-01-04`, nur User mit `> 7` Sessions \u2192 ~49.211 Zeilen."
+  },
+  {
+   "cell_type": "code",
+   "metadata": {},
+   "execution_count": null,
+   "outputs": [],
+   "source": "COHORT_START = \"2023-01-04\"; MIN_SESSIONS = 7\nq = f\"\"\"\nWITH sessions_2023 AS (SELECT * FROM sessions WHERE session_start >= '{COHORT_START}'),\n     cohort_users AS (SELECT user_id FROM sessions_2023 GROUP BY user_id HAVING COUNT(*) > {MIN_SESSIONS})\nSELECT s.*, u.birthdate, u.gender, u.married, u.has_children,\n       u.home_country, u.home_city, u.home_airport,\n       u.home_airport_lat, u.home_airport_lon, u.sign_up_date,\n       f.origin_airport, f.destination, f.destination_airport,\n       f.destination_airport_lat, f.destination_airport_lon,\n       f.seats, f.return_flight_booked, f.departure_time, f.return_time,\n       f.checked_bags, f.trip_airline, f.base_fare_usd,\n       h.hotel_name, h.nights, h.rooms, h.check_in_time, h.check_out_time, h.hotel_per_room_usd\nFROM sessions_2023 s\nJOIN cohort_users cu ON s.user_id = cu.user_id\nLEFT JOIN users   u ON s.user_id = u.user_id\nLEFT JOIN flights f ON s.trip_id = f.trip_id\nLEFT JOIN hotels  h ON s.trip_id = h.trip_id\"\"\"\ndf_sessions = pd.read_sql(q, engine)\nprint(\"Zeilen:\", len(df_sessions), \"| Unique Users:\", df_sessions['user_id'].nunique())\ndf_sessions.head()"
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": "## 5. Cleaning \u2013 `nights` reparieren"
+  },
+  {
+   "cell_type": "code",
+   "metadata": {},
+   "execution_count": null,
+   "outputs": [],
+   "source": "def fix_nights(row):\n    n = row.get(\"nights\")\n    if pd.isna(n): return np.nan\n    if n > 0: return n\n    ci, co = row.get(\"check_in_time\"), row.get(\"check_out_time\")\n    if pd.notna(ci) and pd.notna(co):\n        return max((pd.to_datetime(co) - pd.to_datetime(ci)).days, 1)\n    return 1\ndf_sessions[\"nights_clean\"] = df_sessions.apply(fix_nights, axis=1)\ndf_sessions.loc[df_sessions[\"hotel_booked\"]==True, \"nights_clean\"].describe()"
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": "## 6. Feature Engineering \u2013 Haversine, ADS, Session-Dauer"
+  },
+  {
+   "cell_type": "code",
+   "metadata": {},
+   "execution_count": null,
+   "outputs": [],
+   "source": "from utils import haversine_distance, minmax_scale_series, remove_outliers\n\nvalid_flight = df_sessions[\"flight_booked\"].fillna(False) & ~df_sessions[\"cancellation\"].fillna(False)\ndf_sessions[\"valid_flight\"] = valid_flight\ndf_sessions[\"valid_hotel\"]  = df_sessions[\"hotel_booked\"].fillna(False) & ~df_sessions[\"cancellation\"].fillna(False)\n\ndf_sessions[\"flight_distance_km\"] = np.where(\n    valid_flight & df_sessions[\"destination_airport_lat\"].notna(),\n    haversine_distance(df_sessions[\"home_airport_lat\"], df_sessions[\"home_airport_lon\"],\n                       df_sessions[\"destination_airport_lat\"], df_sessions[\"destination_airport_lon\"]),\n    np.nan)\n\ndf_sessions[\"dollars_saved_flight\"] = np.where(\n    valid_flight,\n    df_sessions[\"base_fare_usd\"].fillna(0) * df_sessions[\"flight_discount_amount\"].fillna(0),\n    np.nan)\n\ndf_sessions[\"session_duration_sec\"] = (\n    pd.to_datetime(df_sessions[\"session_end\"]) - pd.to_datetime(df_sessions[\"session_start\"])\n).dt.total_seconds()\n\ndf_sessions[[\"flight_distance_km\",\"dollars_saved_flight\",\"session_duration_sec\"]].describe()"
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": "### 6.2 Aggregation auf User-Ebene"
+  },
+  {
+   "cell_type": "code",
+   "metadata": {},
+   "execution_count": null,
+   "outputs": [],
+   "source": "def agg_user(g):\n    nf = int(g[\"valid_flight\"].sum()); nh = int(g[\"valid_hotel\"].sum())\n    ndf = int((g[\"valid_flight\"] & g[\"flight_discount\"].fillna(False)).sum())\n    ndh = int((g[\"valid_hotel\"]  & g[\"hotel_discount\"].fillna(False)).sum())\n    tot_saved = g.loc[g[\"valid_flight\"], \"dollars_saved_flight\"].sum()\n    tot_dist  = g.loc[g[\"valid_flight\"], \"flight_distance_km\"].sum()\n    return pd.Series({\n        \"birthdate\":g[\"birthdate\"].iloc[0],\"gender\":g[\"gender\"].iloc[0],\n        \"married\":bool(g[\"married\"].any()),\"has_children\":bool(g[\"has_children\"].any()),\n        \"home_country\":g[\"home_country\"].iloc[0],\"home_city\":g[\"home_city\"].iloc[0],\n        \"home_airport\":g[\"home_airport\"].iloc[0],\"sign_up_date\":g[\"sign_up_date\"].iloc[0],\n        \"num_sessions\":len(g),\n        \"avg_session_duration_sec\":g[\"session_duration_sec\"].mean(),\n        \"avg_page_clicks\":g[\"page_clicks\"].mean(),\n        \"total_page_clicks\":g[\"page_clicks\"].sum(),\n        \"num_cancellations\":int(g[\"cancellation\"].fillna(False).sum()),\n        \"cancellation_rate\":g[\"cancellation\"].fillna(False).mean(),\n        \"num_flight_bookings\":nf,\"num_discounted_flight_bookings\":ndf,\n        \"avg_flight_discount\":g.loc[g[\"valid_flight\"],\"flight_discount_amount\"].mean(),\n        \"avg_base_fare_usd\":g.loc[g[\"valid_flight\"],\"base_fare_usd\"].mean(),\n        \"total_flight_spend_usd\":g.loc[g[\"valid_flight\"],\"base_fare_usd\"].sum(),\n        \"avg_flight_distance_km\":g.loc[g[\"valid_flight\"],\"flight_distance_km\"].mean(),\n        \"total_flight_distance_km\":tot_dist,\n        \"total_dollars_saved_flight\":tot_saved,\n        \"avg_seats\":g.loc[g[\"valid_flight\"],\"seats\"].mean(),\n        \"avg_checked_bags\":g.loc[g[\"valid_flight\"],\"checked_bags\"].mean(),\n        \"num_return_flights\":int((g[\"valid_flight\"] & g[\"return_flight_booked\"].fillna(False)).sum()),\n        \"num_hotel_bookings\":nh,\"num_discounted_hotel_bookings\":ndh,\n        \"avg_hotel_discount\":g.loc[g[\"valid_hotel\"],\"hotel_discount_amount\"].mean(),\n        \"avg_hotel_price_per_room\":g.loc[g[\"valid_hotel\"],\"hotel_per_room_usd\"].mean(),\n        \"avg_nights_per_stay\":g.loc[g[\"valid_hotel\"],\"nights_clean\"].mean(),\n        \"total_hotel_spend_usd\":(g.loc[g[\"valid_hotel\"],\"nights_clean\"]\n                                 * g.loc[g[\"valid_hotel\"],\"rooms\"]\n                                 * g.loc[g[\"valid_hotel\"],\"hotel_per_room_usd\"]).sum(),\n        \"avg_rooms\":g.loc[g[\"valid_hotel\"],\"rooms\"].mean(),\n        \"discount_flight_proportion\": (ndf/nf) if nf>0 else 0.0,\n        \"discount_hotel_proportion\":  (ndh/nh) if nh>0 else 0.0,\n        \"ads_per_km\": (tot_saved/tot_dist) if tot_dist and tot_dist>0 else 0.0,\n    })\n\ndf_user = df_sessions.groupby(\"user_id\").apply(agg_user).reset_index()\ndf_user[\"age\"] = ((pd.Timestamp.today() - pd.to_datetime(df_user[\"birthdate\"])).dt.days / 365.25).astype(int)\ndf_user[\"months_since_signup\"] = ((pd.Timestamp.today() - pd.to_datetime(df_user[\"sign_up_date\"])).dt.days / 30).astype(int)\nprint(df_user.shape); df_user.head()"
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": "## 7. Index-Metriken (Personas)"
+  },
+  {
+   "cell_type": "code",
+   "metadata": {},
+   "execution_count": null,
+   "outputs": [],
+   "source": "# bargain hunter\ndf_user[\"bargain_hunter_index\"] = (\n    df_user[\"discount_flight_proportion\"].fillna(0)\n    * df_user[\"avg_flight_discount\"].fillna(0)\n    * df_user[\"ads_per_km\"].fillna(0))\n# family\ndf_user[\"family_traveler_index\"] = (\n    df_user[\"avg_rooms\"].fillna(0) * df_user[\"avg_seats\"].fillna(0)\n    * df_user[\"has_children\"].astype(int))\n# business\ndf_user[\"business_traveler_index\"] = (\n    (1/df_user[\"avg_nights_per_stay\"].replace(0,np.nan)).fillna(0)\n    * (1/df_user[\"avg_checked_bags\"].replace(0,np.nan)).fillna(0))\n# luxury\ndf_user[\"luxury_index\"] = df_user[\"avg_hotel_price_per_room\"].fillna(0) * df_user[\"num_hotel_bookings\"]\n# loyalty\ndf_user[\"loyalty_index\"] = df_user[\"num_sessions\"] * (1 - df_user[\"cancellation_rate\"].fillna(0))\n\ndf_user[[\"bargain_hunter_index\",\"family_traveler_index\",\"business_traveler_index\",\"luxury_index\",\"loyalty_index\"]].describe()"
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": "## 8. Ausrei\u00dfer \u2013 IQR-Methode (k = 3)"
+  },
+  {
+   "cell_type": "code",
+   "metadata": {},
+   "execution_count": null,
+   "outputs": [],
+   "source": "cols = [\"num_sessions\",\"avg_page_clicks\",\"total_flight_spend_usd\",\"total_hotel_spend_usd\",\n        \"avg_flight_distance_km\",\"avg_session_duration_sec\",\"avg_hotel_price_per_room\"]\nprint(\"vorher:\", df_user.shape)\ndf_user_clean = remove_outliers(df_user, cols, k=3.0)\nprint(\"nachher:\", df_user_clean.shape)"
+  },
+  {
+   "cell_type": "code",
+   "metadata": {},
+   "execution_count": null,
+   "outputs": [],
+   "source": "fig,axes = plt.subplots(1,2,figsize=(14,4))\nsns.boxplot(data=df_user[cols], ax=axes[0]); axes[0].set_title(\"Vor\"); axes[0].tick_params(axis='x',rotation=45)\nsns.boxplot(data=df_user_clean[cols], ax=axes[1]); axes[1].set_title(\"Nach\"); axes[1].tick_params(axis='x',rotation=45)\nplt.tight_layout(); plt.show()"
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": "## 9. MinMax-Skalierung"
+  },
+  {
+   "cell_type": "code",
+   "metadata": {},
+   "execution_count": null,
+   "outputs": [],
+   "source": "metric_cols = [\"num_sessions\",\"avg_page_clicks\",\"avg_session_duration_sec\",\"cancellation_rate\",\n  \"num_flight_bookings\",\"num_hotel_bookings\",\"avg_flight_discount\",\"avg_hotel_discount\",\n  \"discount_flight_proportion\",\"discount_hotel_proportion\",\"avg_base_fare_usd\",\n  \"avg_hotel_price_per_room\",\"avg_nights_per_stay\",\"avg_flight_distance_km\",\n  \"total_flight_spend_usd\",\"total_hotel_spend_usd\",\"ads_per_km\",\n  \"bargain_hunter_index\",\"family_traveler_index\",\"business_traveler_index\",\"luxury_index\",\"loyalty_index\"]\ndf_scaled = df_user_clean.copy()\nfor c in metric_cols:\n    if c in df_scaled.columns:\n        df_scaled[c+\"_scaled\"] = minmax_scale_series(df_scaled[c])\nscaled = [c+\"_scaled\" for c in metric_cols if c+\"_scaled\" in df_scaled.columns]\ndf_scaled[scaled].describe()"
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": "## 10. Korrelations-Heatmap"
+  },
+  {
+   "cell_type": "code",
+   "metadata": {},
+   "execution_count": null,
+   "outputs": [],
+   "source": "plt.figure(figsize=(11,8))\nsns.heatmap(df_scaled[scaled].corr(), cmap=\"coolwarm\", center=0)\nplt.title(\"Korrelation der skalierten Metriken\"); plt.tight_layout(); plt.show()"
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": "## 11. Persona-Verteilungen"
+  },
+  {
+   "cell_type": "code",
+   "metadata": {},
+   "execution_count": null,
+   "outputs": [],
+   "source": "fig,axes = plt.subplots(2,3,figsize=(15,8))\nfor ax,col in zip(axes.ravel(),\n    [\"bargain_hunter_index_scaled\",\"family_traveler_index_scaled\",\n     \"business_traveler_index_scaled\",\"luxury_index_scaled\",\n     \"loyalty_index_scaled\",\"ads_per_km_scaled\"]):\n    if col in df_scaled.columns:\n        sns.histplot(df_scaled[col], bins=40, ax=ax, color=\"steelblue\"); ax.set_title(col)\nplt.tight_layout(); plt.show()"
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": "## 12. Export"
+  },
+  {
+   "cell_type": "code",
+   "metadata": {},
+   "execution_count": null,
+   "outputs": [],
+   "source": "df_user_clean.to_csv(\"traveltide_user_features.csv\", index=False)\ndf_scaled.to_csv(\"traveltide_user_features_scaled.csv\", index=False)\nprint(\"OK\", df_user_clean.shape, df_scaled.shape)"
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": "---\n\n## Zusammenfassung\n\n| Schritt | Ergebnis |\n|---|---|\n| Kohorte | Sessions ab 04.01.2023 + User mit >7 Sessions |\n| Session-Level | ~49.211 Zeilen |\n| User-Level | ~5.998 Zeilen vor Outlier-Filter |\n| Index-Metriken | bargain_hunter / family_traveler / business_traveler / luxury / loyalty |\n| Skalierung | MinMax \u2192 [0, 1] |\n| Outlier | IQR \u00d7 3 |\n\n**N\u00e4chste Schritte (Woche 4+):** KMeans-Clustering auf den skalierten Metriken, Persona-Zuordnung, Perk-Empfehlung pro Cluster."
+  }
+ ],
+ "metadata": {
+  "kernelspec": {
+   "display_name": "Python 3",
+   "language": "python",
+   "name": "python3"
+  },
+  "language_info": {
+   "name": "python",
+   "version": "3.11"
+  }
+ },
+ "nbformat": 4,
+ "nbformat_minor": 5
+}
